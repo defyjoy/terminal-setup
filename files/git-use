@@ -1,0 +1,354 @@
+#!/usr/bin/env bash
+# git-use — switch the active GitHub SSH key using named Host profiles in ~/.ssh/config
+set -euo pipefail
+
+VERSION="0.2.0"
+SSH_CONFIG="${GIT_SWITCHER_SSH_CONFIG:-${HOME}/.ssh/config}"
+ACTIVE_HOST="${GIT_SWITCHER_ACTIVE_HOST:-github.com}"
+DEFAULT_ACTIVE_KEY="${GIT_SWITCHER_ACTIVE_KEY:-${HOME}/.ssh/github-active}"
+
+usage() {
+  cat <<'EOF'
+git-use — switch GitHub SSH identity from named Host profiles in ssh config
+
+Usage:
+  git-use <profile>     Switch active github.com key to profile's IdentityFile
+  git-use list          List GitHub Host profiles
+  git-use status        Show active key and authenticate
+  git-use doctor        Validate ssh config setup
+  git-use version       Print version
+
+Profiles are Host blocks in ~/.ssh/config where HostName is github.com
+and the Host name is not github.com itself, for example:
+
+  Host github.com
+    HostName github.com
+    User git
+    IdentitiesOnly yes
+    IdentityFile ~/.ssh/github-active
+
+  Host personal
+    HostName github.com
+    User git
+    IdentitiesOnly yes
+    IdentityFile ~/.ssh/github
+
+  Host xyz
+    HostName github.com
+    User git
+    IdentitiesOnly yes
+    IdentityFile ~/.ssh/xyz
+
+Then:
+  git-use xyz
+  ssh -T git@github.com
+EOF
+}
+
+expand_path() {
+  local p="$1"
+  if [[ "$p" == ~* ]]; then
+    p="${p/#\~/${HOME}}"
+  fi
+  printf '%s' "$p"
+}
+
+# Parse ssh config into lines: host|hostname|identityfile (last wins per host token)
+# Handles simple Include of absolute/tilde paths (one level).
+parse_ssh_config() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+
+  local current_hosts=()
+  local hostname="" identity=""
+  local line key value
+
+  flush() {
+    local h
+    if ((${#current_hosts[@]})); then
+      for h in "${current_hosts[@]}"; do
+        printf '%s|%s|%s\n' "$h" "${hostname:-}" "${identity:-}"
+      done
+    fi
+    current_hosts=()
+    hostname=""
+    identity=""
+  }
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    # strip comments
+    line="${line%%#*}"
+    # trim
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" ]] && continue
+
+    key="${line%%[[:space:]]*}"
+    value="${line#"$key"}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    # lowercase key for matching
+    local key_lc
+    key_lc="$(printf '%s' "$key" | tr '[:upper:]' '[:lower:]')"
+
+    case "$key_lc" in
+      include)
+        local inc
+        for inc in $value; do
+          inc="$(expand_path "$inc")"
+          # skip globs we can't easily expand without bash nullglob complexity for orb etc.
+          if [[ "$inc" == *[\*\?]* ]]; then
+            local match
+            for match in $inc; do
+              [[ -f "$match" ]] && parse_ssh_config "$match"
+            done
+          elif [[ -f "$inc" ]]; then
+            parse_ssh_config "$inc"
+          fi
+        done
+        ;;
+      host)
+        flush
+        # split host aliases
+        local tok
+        for tok in $value; do
+          [[ "$tok" == "*" ]] && continue
+          current_hosts+=("$tok")
+        done
+        ;;
+      hostname)
+        hostname="$value"
+        ;;
+      identityfile)
+        identity="$(expand_path "$value")"
+        ;;
+      match)
+        flush
+        ;;
+    esac
+  done <"$file"
+  flush
+}
+
+host_records() {
+  parse_ssh_config "$SSH_CONFIG"
+}
+
+lookup_host() {
+  local want="$1"
+  local h hn id
+  while IFS='|' read -r h hn id; do
+    if [[ "$h" == "$want" ]]; then
+      printf '%s|%s\n' "$hn" "$id"
+      return 0
+    fi
+  done < <(host_records)
+  return 1
+}
+
+is_github_hostname() {
+  local hn="$1"
+  [[ "$hn" == "github.com" || "$hn" == "ssh.github.com" ]]
+}
+
+list_profiles() {
+  local h hn id
+  local -a seen=()
+  while IFS='|' read -r h hn id; do
+    [[ "$h" == "$ACTIVE_HOST" ]] && continue
+    is_github_hostname "$hn" || continue
+    [[ -z "$id" ]] && continue
+    local s
+    for s in "${seen[@]+"${seen[@]}"}"; do
+      [[ "$s" == "$h" ]] && continue 2
+    done
+    seen+=("$h")
+    printf '%s\t%s\n' "$h" "$id"
+  done < <(host_records)
+}
+
+active_identity_path() {
+  local rec hn id
+  if rec="$(lookup_host "$ACTIVE_HOST")"; then
+    IFS='|' read -r hn id <<<"$rec"
+    if [[ -n "$id" ]]; then
+      printf '%s' "$id"
+      return 0
+    fi
+  fi
+  printf '%s' "$DEFAULT_ACTIVE_KEY"
+}
+
+cmd_list() {
+  local name path
+  local profiles
+  profiles="$(list_profiles)" || true
+  if [[ -z "$profiles" ]]; then
+    echo "No GitHub Host profiles found in $SSH_CONFIG" >&2
+    echo "Add Host blocks with HostName github.com (other than github.com itself)." >&2
+    return 1
+  fi
+  printf '%-20s %s\n' "PROFILE" "IDENTITYFILE"
+  while IFS=$'\t' read -r name path; do
+    printf '%-20s %s\n' "$name" "$path"
+  done <<<"$profiles"
+}
+
+cmd_status() {
+  local active resolved target
+  active="$(active_identity_path)"
+  echo "ssh config:     $SSH_CONFIG"
+  echo "active host:    $ACTIVE_HOST"
+  echo "IdentityFile:   $active"
+  if [[ -L "$active" ]]; then
+    target="$(readlink "$active")"
+    echo "symlink →       $target"
+    resolved="$target"
+  elif [[ -f "$active" ]]; then
+    echo "type:           regular file (not a symlink — switch will replace/relink)"
+    resolved="$active"
+  else
+    echo "type:           missing"
+    resolved=""
+  fi
+
+  local name path
+  while IFS=$'\t' read -r name path; do
+    if [[ -n "$resolved" && ("$path" == "$resolved" || "$path" == "$active") ]]; then
+      echo "profile:        $name"
+    fi
+  done < <(list_profiles)
+
+  echo
+  ssh -o BatchMode=yes -T "git@${ACTIVE_HOST}" 2>&1 || true
+}
+
+cmd_doctor() {
+  local ok=0
+  echo "Checking $SSH_CONFIG"
+  if [[ ! -f "$SSH_CONFIG" ]]; then
+    echo "ERROR: ssh config not found"
+    return 1
+  fi
+
+  local rec hn id
+  if ! rec="$(lookup_host "$ACTIVE_HOST")"; then
+    echo "ERROR: no Host $ACTIVE_HOST entry"
+    ok=1
+  else
+    IFS='|' read -r hn id <<<"$rec"
+    echo "OK: Host $ACTIVE_HOST (IdentityFile=${id:-unset})"
+    if [[ -z "$id" ]]; then
+      echo "ERROR: Host $ACTIVE_HOST has no IdentityFile"
+      ok=1
+    elif [[ ! -L "$id" ]]; then
+      echo "WARN: $id is not a symlink — git-use will create/replace it as a symlink to the profile key"
+    else
+      echo "OK: active IdentityFile is a symlink → $(readlink "$id")"
+    fi
+  fi
+
+  local count=0 name path
+  local profile_lines=""
+  while IFS=$'\t' read -r name path; do
+    count=$((count + 1))
+    if [[ -f "$path" ]]; then
+      profile_lines+="  OK  $name → $path"$'\n'
+    else
+      profile_lines+="  ERR $name → $path (missing)"$'\n'
+      ok=1
+    fi
+  done < <(list_profiles)
+
+  if [[ "$count" -eq 0 ]]; then
+    echo "ERROR: no profile Hosts (HostName github.com, name != $ACTIVE_HOST)"
+    ok=1
+  else
+    echo "OK: $count profile(s):"
+    printf '%s' "$profile_lines"
+  fi
+
+  return "$ok"
+}
+
+cmd_switch() {
+  local profile="$1"
+  local rec hn id active
+
+  if [[ "$profile" == "$ACTIVE_HOST" ]]; then
+    echo "ERROR: '$profile' is the active host, not a profile. Use: git-use list" >&2
+    return 1
+  fi
+
+  if ! rec="$(lookup_host "$profile")"; then
+    echo "ERROR: Host '$profile' not found in $SSH_CONFIG" >&2
+    echo "Available profiles:" >&2
+    list_profiles | awk -F'\t' '{print "  " $1}' >&2 || true
+    return 1
+  fi
+
+  IFS='|' read -r hn id <<<"$rec"
+  if ! is_github_hostname "$hn"; then
+    echo "ERROR: Host '$profile' HostName is '${hn:-empty}', expected github.com" >&2
+    return 1
+  fi
+  if [[ -z "$id" ]]; then
+    echo "ERROR: Host '$profile' has no IdentityFile" >&2
+    return 1
+  fi
+  if [[ ! -f "$id" ]]; then
+    echo "ERROR: IdentityFile does not exist: $id" >&2
+    return 1
+  fi
+
+  active="$(active_identity_path)"
+  mkdir -p "$(dirname "$active")"
+
+  # If active path is currently a real key file that is also a profile key, refuse to clobber
+  if [[ -e "$active" && ! -L "$active" ]]; then
+    local ppath
+    while IFS=$'\t' read -r _ ppath; do
+      if [[ "$active" -ef "$ppath" ]]; then
+        echo "ERROR: Host $ACTIVE_HOST IdentityFile is $active," >&2
+        echo "which is also a profile key. Point github.com at a dedicated symlink path first, e.g.:" >&2
+        echo "  IdentityFile ~/.ssh/github-active" >&2
+        return 1
+      fi
+    done < <(list_profiles)
+    # Real file that isn't a profile key — back it up once, then replace with symlink
+    if [[ ! -e "${active}.bak" ]]; then
+      cp -p "$active" "${active}.bak"
+      echo "Backed up $active → ${active}.bak"
+    fi
+    rm -f "$active"
+  fi
+
+  ln -sfn "$id" "$active"
+  echo "Switched $ACTIVE_HOST → $profile ($id)"
+  ssh -o BatchMode=yes -T "git@${ACTIVE_HOST}" 2>&1 || true
+}
+
+main() {
+  local cmd="${1:-}"
+  case "$cmd" in
+    ""|-h|--help|help)
+      usage
+      ;;
+    version|--version|-V)
+      echo "git-use $VERSION"
+      ;;
+    list|ls)
+      cmd_list
+      ;;
+    status|st)
+      cmd_status
+      ;;
+    doctor|check)
+      cmd_doctor
+      ;;
+    *)
+      cmd_switch "$cmd"
+      ;;
+  esac
+}
+
+main "$@"

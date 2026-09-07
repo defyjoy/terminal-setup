@@ -1,0 +1,48 @@
+# Starship prompt config — created by beautify-terminal setup (2026-09-05)
+# Rollback: ~/.terminal-rollback.sh deletes this file.
+
+add_newline = false
+command_timeout = 1000
+
+[character]
+success_symbol = "[❯](bold green)"
+error_symbol = "[❯](bold red)"
+
+[git_branch]
+symbol = " "
+
+[git_status]
+modified = ""
+ahead = " ↑"
+behind = " ↓"
+diverged = " ↕"
+staged = ""
+untracked = ""
+stashed = ""
+conflicted = "~"
+deleted = ""
+
+[cmd_duration]
+min_time = 3000
+format = " in [took]($style) "
+style = "bold yellow"
+
+[package]
+symbol = " "
+
+[directory]
+style = "bold cyan"
+truncation_length = 3
+truncate_to_repo = true
+
+[nodejs]
+symbol = " "
+
+[python]
+symbol = " "
+
+[terraform]
+symbol = " "
+
+[golang]
+symbol = " "
