@@ -20,6 +20,8 @@ Companion files (in this same directory, `files/`):
 - `zinit-plugins.zsh` — plugin manager bootstrap + plugin list, copy to
   `~/.zinit-plugins.zsh` verbatim (sourced from `zshrc.append.sh`)
 - `git-use` — custom bash script (GitHub SSH identity switcher), copy verbatim
+- `ghostty.config` — Ghostty terminal emulator config (macOS only), copy to
+  `~/.config/ghostty/config` verbatim (§3a)
 
 ---
 
@@ -186,6 +188,48 @@ brew install --cask font-jetbrains-mono-nerd-font   # macOS
   in the zshrc block in §5) and your terminal emulator has 24-bit color
   enabled (default on iTerm2, Kitty, Alacritty, WezTerm; GNOME Terminal
   supports it by default too).
+
+---
+
+## 3a. Terminal emulator — Ghostty (macOS, alternative/companion to iTerm2)
+
+Ghostty is used alongside iTerm2 on the source machine, tuned to visually
+match the iTerm2 profile above (same font, same transparency/blur values,
+same dark palette) plus a custom titlebar style that gives it iTerm-style
+**seamless tabs merged into the titlebar** — no separate grey tab strip.
+
+```bash
+brew install --cask ghostty
+mkdir -p ~/.config/ghostty
+cp files/ghostty.config ~/.config/ghostty/config
+```
+
+Key settings and why (see `files/ghostty.config` for the full file, comments
+included):
+- `macos-titlebar-style = tabs` — this is the setting that makes tabs sleek.
+  Ghostty draws a fully custom titlebar with the tab strip built into it,
+  always matching the terminal background color, instead of the native
+  macOS titlebar + separate tab bar. This is the closest Ghostty gets to
+  iTerm2's minimal tab look. (Other values: `native` = stock macOS titlebar,
+  `transparent` = native but see-through, the Ghostty default; `hidden` =
+  no titlebar at all, no tab strip visible.)
+- `macos-titlebar-proxy-icon = hidden` — removes the folder proxy icon next
+  to the title, one less visual element cluttering the tab/titlebar area.
+- `window-theme = auto` — titlebar follows macOS light/dark mode.
+- `background-opacity = 0.77`, `background-blur = 64` — matches iTerm2's
+  Transparency 0.23 / Blur Radius 64 (Ghostty's opacity scale is inverted:
+  1.0 = fully opaque).
+- `theme = Kanagawa Wave` — dark palette matching iTerm2's Dark profile
+  colors; Ghostty has no auto light/dark palette switch like iTerm2 does,
+  so this is pinned rather than dynamic.
+- `window-save-state = always` — restores tabs/splits across relaunches.
+
+Ghostty tabs are native AppKit tab controls even with `tabs` style — there's
+no config knob for tab height/font beyond what's above; this is the
+sleekest configuration Ghostty currently exposes (as of the version on the
+source machine). Requires quitting and relaunching Ghostty (not just
+reloading config) for `macos-titlebar-style` changes to take effect on
+already-open windows.
 
 ---
 
